@@ -5,7 +5,7 @@ use spawn;
 use std::sync::Arc;
 use std::error::Error;
 use std::fmt;
-use registry::{Registry, WorkerThread};
+use registry::{Registry, WorkerThread, set_current_registry};
 
 mod internal;
 mod test;
@@ -70,6 +70,10 @@ impl ThreadPool {
         }
 
         &DEFAULT_THREAD_POOL
+    }
+
+    pub fn with_global_registry<F: FnOnce() -> R, R>(&self, f: F) -> R {
+        set_current_registry(&self.registry, f)
     }
 
     /// Executes `op` within the threadpool. Any attempts to use

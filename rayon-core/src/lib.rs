@@ -21,7 +21,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rayon-core/1.3")]
 #![allow(non_camel_case_types)] // I prefer to use ALL_CAPS for type parameters
-#![deny(missing_debug_implementations)]
+//#![deny(missing_debug_implementations)]
 #![cfg_attr(test, feature(conservative_impl_trait))]
 
 use std::any::Any;
@@ -34,6 +34,8 @@ use std::fmt;
 extern crate coco;
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate scoped_tls;
 extern crate libc;
 extern crate num_cpus;
 extern crate rand;
@@ -41,10 +43,10 @@ extern crate rand;
 #[macro_use]
 mod log;
 
-mod latch;
+pub mod latch;
 mod join;
 mod job;
-mod registry;
+pub mod registry;
 mod scope;
 mod sleep;
 mod spawn;
@@ -108,6 +110,9 @@ pub struct Configuration {
     /// Closure invoked on worker thread exit.
     exit_handler: Option<Box<ExitHandler>>,
 
+    /// Closure invoked on worker thread start.
+    main_handler: Option<Box<MainHandler>>,
+
     /// If false, worker threads will execute spawned jobs in a
     /// "depth-first" fashion. If true, they will do a "breadth-first"
     /// fashion. Depth-first is the default.
@@ -117,6 +122,12 @@ pub struct Configuration {
 /// The type for a panic handling closure. Note that this same closure
 /// may be invoked multiple times in parallel.
 type PanicHandler = Fn(Box<Any + Send>) + Send + Sync;
+
+/// The type for a closure that gets invoked with a
+/// function which runs rayon tasks.
+/// The closure is passed the index of the thread on which it is invoked.
+/// Note that this same closure may be invoked multiple times in parallel.
+type MainHandler = Fn(usize, &mut FnMut()) + Send + Sync;
 
 /// The type for a closure that gets invoked when a thread starts. The
 /// closure is passed the index of the thread on which it is invoked.
@@ -269,6 +280,23 @@ impl Configuration {
         self.breadth_first
     }
 
+    /// Takes the current thread main callback, leaving `None`.
+    fn take_main_handler(&mut self) -> Option<Box<MainHandler>> {
+        self.main_handler.take()
+    }
+
+    /// Set a callback to be invoked on thread main.
+    ///
+    /// The closure is passed the index of the thread on which it is invoked.
+    /// Note that this same closure may be invoked multiple times in parallel.
+    /// If this closure panics, the panic will be passed to the panic handler.
+    pub fn main_handler<H>(mut self, main_handler: H) -> Configuration
+        where H: Fn(usize, &mut FnMut()) + Send + Sync + 'static
+    {
+        self.main_handler = Some(Box::new(main_handler));
+        self
+    }
+
     /// Takes the current thread start callback, leaving `None`.
     fn take_start_handler(&mut self) -> Option<Box<StartHandler>> {
         self.start_handler.take()
@@ -333,7 +361,7 @@ impl fmt::Debug for Configuration {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let Configuration { ref num_threads, ref get_thread_name,
                             ref panic_handler, ref stack_size,
-                            ref start_handler, ref exit_handler,
+                            ref start_handler, ref main_handler, ref exit_handler,
                             ref breadth_first } = *self;
 
         // Just print `Some(<closure>)` or `None` to the debug
@@ -347,6 +375,7 @@ impl fmt::Debug for Configuration {
         let get_thread_name = get_thread_name.as_ref().map(|_| ClosurePlaceholder);
         let panic_handler = panic_handler.as_ref().map(|_| ClosurePlaceholder);
         let start_handler = start_handler.as_ref().map(|_| ClosurePlaceholder);
+        let main_handler = main_handler.as_ref().map(|_| ClosurePlaceholder);
         let exit_handler = exit_handler.as_ref().map(|_| ClosurePlaceholder);
 
         f.debug_struct("Configuration")
@@ -355,6 +384,7 @@ impl fmt::Debug for Configuration {
          .field("panic_handler", &panic_handler)
          .field("stack_size", &stack_size)
          .field("start_handler", &start_handler)
+         .field("main_handler", &main_handler)
          .field("exit_handler", &exit_handler)
          .field("breadth_first", &breadth_first)
          .finish()

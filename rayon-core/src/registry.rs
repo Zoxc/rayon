@@ -1,4 +1,4 @@
-use ::{Configuration, ExitHandler, PanicHandler, StartHandler};
+use ::{Configuration, ExitHandler, PanicHandler, StartHandler, MainHandler};
 use coco::deque::{self, Worker, Stealer};
 use job::{JobRef, StackJob};
 #[cfg(rayon_unstable)]
@@ -44,6 +44,7 @@ pub struct Registry {
     job_uninjector: Stealer<JobRef>,
     panic_handler: Option<Box<PanicHandler>>,
     start_handler: Option<Box<StartHandler>>,
+    main_handler: Option<Box<MainHandler>>,
     exit_handler: Option<Box<ExitHandler>>,
 
     // When this latch reaches 0, it means that all work on this
@@ -64,6 +65,19 @@ pub struct Registry {
 
 struct RegistryState {
     job_injector: Worker<JobRef>,
+}
+
+scoped_thread_local!(static CURRENT_REGISTRY: Arc<Registry>);
+
+pub fn set_current_registry<F: FnOnce() -> R, R>(registry: &Arc<Registry>, f: F) -> R {
+    CURRENT_REGISTRY.set(registry, f)
+}
+
+/// Starts the worker threads (if that has not already happened). If
+/// initialization has not already occurred, use the default
+/// configuration.
+fn with_current_registry<F: FnOnce(&Arc<Registry>) -> R, R> (f: F) -> R {
+    CURRENT_REGISTRY.with(f)
 }
 
 /// ////////////////////////////////////////////////////////////////////////
@@ -130,6 +144,7 @@ impl Registry {
             terminate_latch: CountLatch::new(),
             panic_handler: configuration.take_panic_handler(),
             start_handler: configuration.take_start_handler(),
+            main_handler: configuration.take_main_handler(),
             exit_handler: configuration.take_exit_handler(),
         });
 
@@ -156,14 +171,14 @@ impl Registry {
 
     #[cfg(rayon_unstable)]
     pub fn global() -> Arc<Registry> {
-        global_registry().clone()
+        with_current_registry(|r| r.clone())
     }
 
     pub fn current() -> Arc<Registry> {
         unsafe {
             let worker_thread = WorkerThread::current();
             if worker_thread.is_null() {
-                global_registry().clone()
+                with_current_registry(|r| r.clone())
             } else {
                 (*worker_thread).registry.clone()
             }
@@ -177,7 +192,7 @@ impl Registry {
         unsafe {
             let worker_thread = WorkerThread::current();
             if worker_thread.is_null() {
-                global_registry().num_threads()
+                with_current_registry(|r| r.num_threads())
             } else {
                 (*worker_thread).registry.num_threads()
             }
@@ -224,7 +239,6 @@ impl Registry {
 
     /// Waits for the worker threads to stop. This is used for testing
     /// -- so we can check that termination actually works.
-    #[cfg(test)]
     pub fn wait_until_stopped(&self) {
         for info in &self.thread_infos {
             info.stopped.wait();
@@ -664,7 +678,20 @@ unsafe fn main_loop(worker: Worker<JobRef>,
         }
     }
 
-    worker_thread.wait_until(&registry.terminate_latch);
+    let mut work = || worker_thread.wait_until(&registry.terminate_latch);
+
+    if let Some(ref handler) = registry.main_handler {
+        let registry = registry.clone();
+        match unwind::halt_unwinding(|| handler(index, &mut work)) {
+            Ok(()) => {
+            }
+            Err(err) => {
+                registry.handle_panic(err);
+            }
+        }
+    } else {
+        work();
+    }
 
     // Should not be any work left in our queue.
     debug_assert!(worker_thread.take_local_job().is_none());
@@ -705,7 +732,7 @@ pub fn in_worker<OP, R>(op: OP) -> R
             // invalidated until we return.
             op(&*owner_thread, false)
         } else {
-            global_registry().in_worker_cold(op)
+            with_current_registry(|r| r.in_worker_cold(op))
         }
     }
 }
