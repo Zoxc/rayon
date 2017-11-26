@@ -3,6 +3,7 @@ use join;
 use {scope, Scope};
 use spawn;
 use std::sync::Arc;
+use std::mem;
 use std::error::Error;
 use std::fmt;
 use registry::{Registry, WorkerThread, set_current_registry};
@@ -74,6 +75,43 @@ impl ThreadPool {
 
     pub fn with_global_registry<F: FnOnce() -> R, R>(&self, f: F) -> R {
         set_current_registry(&self.registry, f)
+    }
+
+    pub fn scoped_pool<F, R, H>(configuration: Configuration,
+                                main_handler: H,
+                                with_pool: F) -> Result<R, Box<Error>>
+    where F: FnOnce(&ThreadPool) -> R,
+          H: Fn(&mut FnMut()) + Send + Sync
+    {
+        struct Handler(*const ());
+        unsafe impl Send for Handler {}
+        unsafe impl Sync for Handler {}
+
+        let handler = Handler(&main_handler as *const _ as *const ());
+
+        let configuration = configuration.main_handler(move |_, worker| {
+            let handler = unsafe { &*(handler.0 as *const H) };
+            handler(worker);
+        });
+
+        let pool = ThreadPool::new(configuration)?;
+
+        struct JoinRegistry(Arc<Registry>);
+
+        impl Drop for JoinRegistry {
+            fn drop(&mut self) {
+                self.0.wait_until_stopped();
+            }
+        }
+
+        let _join_registry = JoinRegistry(pool.registry.clone());
+
+        let r = with_pool(&pool);
+
+        // Drop the pool so the registry terminates before we wait for the registry to stop
+        mem::drop(pool);
+
+        Ok(r)
     }
 
     /// Executes `op` within the threadpool. Any attempts to use
