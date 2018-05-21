@@ -63,7 +63,7 @@ pub mod tlv;
 pub mod internal;
 pub use join::{join, join_context};
 pub use scope::{scope, Scope};
-pub use registry::{Registry, block, unblock};
+pub use registry::{Registry, mark_blocked, mark_unblocked};
 pub use spawn::spawn;
 pub use worker_local::WorkerLocal;
 
