@@ -513,27 +513,35 @@ pub struct WorkerThread {
 // thread local variable. So it will remain valid at least until the
 // worker is fully unwound. Using an unsafe pointer avoids the need
 // for a RefCell<T> etc.
-thread_local! {
-    static WORKER_THREAD_STATE: Cell<*const WorkerThread> =
-        Cell::new(0 as *const WorkerThread)
-}
+#[thread_local]
+static WORKER_THREAD_STATE: Cell<*const WorkerThread> =
+    Cell::new(0 as *const WorkerThread);
 
 impl WorkerThread {
     /// Gets the `WorkerThread` index for the current thread; returns
     /// NULL if this is not a worker thread. This pointer is valid
     /// anywhere on the current thread.
-    #[inline]
+    // Must have inline(never) so the use of WORKER_THREAD_STATE doesn't escape the crate
+    #[inline(never)]
     pub fn current() -> *const WorkerThread {
-        WORKER_THREAD_STATE.with(|t| t.get())
+        WORKER_THREAD_STATE.get()
+    }
+
+    /// Gets the `WorkerThread` index for the current thread; returns
+    /// NULL if this is not a worker thread. This pointer is valid
+    /// anywhere on the current thread.
+    #[inline(always)] /// This is unsafe because the code cannot escape this crate
+    pub(crate) unsafe fn unsafe_current() -> *const WorkerThread {
+        WORKER_THREAD_STATE.get()
     }
 
     /// Sets `self` as the worker thread index for the current thread.
     /// This is done during worker thread startup.
+    // Must have inline(never) so the use of WORKER_THREAD_STATE doesn't escape the crate
+    #[inline(never)]
     unsafe fn set_current(thread: *const WorkerThread) {
-        WORKER_THREAD_STATE.with(|t| {
-            assert!(t.get().is_null());
-            t.set(thread);
-        });
+        assert!(WORKER_THREAD_STATE.get().is_null());
+        WORKER_THREAD_STATE.set(thread);
     }
 
     /// Returns the registry that owns this worker thread.

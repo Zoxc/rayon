@@ -18,6 +18,26 @@ pub struct WorkerLocal<T> {
 unsafe impl<T> Send for WorkerLocal<T> {}
 unsafe impl<T> Sync for WorkerLocal<T> {}
 
+#[inline(never)]
+#[cold]
+fn wrong_thread() -> ! {
+    panic!("WorkerLocal can only be used on the thread pool it was created on")
+}
+
+// Must have inline(never) so the use of WORKER_THREAD_STATE doesn't escape the crate
+#[inline(never)]
+fn thread_check(reg: &Registry) -> usize {
+    unsafe {
+        let worker_thread = WorkerThread::unsafe_current();
+        let wrong = worker_thread.is_null()
+            || &*(*worker_thread).registry as *const _ != reg as *const _;
+        if wrong {
+            wrong_thread();
+        }
+        (*worker_thread).index
+    }
+}
+
 impl<T> WorkerLocal<T> {
     /// Creates a new worker local where the `initial` closure computes the
     /// value this worker local should take for each thread in the thread pool.
@@ -40,13 +60,8 @@ impl<T> WorkerLocal<T> {
 
     fn current(&self) -> &T {
         unsafe {
-            let worker_thread = WorkerThread::current();
-            if worker_thread.is_null()
-                || &*(*worker_thread).registry as *const _ != &*self.registry as *const _
-            {
-                panic!("WorkerLocal can only be used on the thread pool it was created on")
-            }
-            &self.locals[(*worker_thread).index].0
+            let idx = thread_check(&self.registry);
+            &self.locals.get_unchecked(idx).0
         }
     }
 }

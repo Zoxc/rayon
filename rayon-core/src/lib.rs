@@ -21,6 +21,8 @@
 
 #![doc(html_root_url = "https://docs.rs/rayon-core/1.4")]
 
+#![feature(thread_local)]
+
 use std::any::Any;
 use std::env;
 use std::error::Error;
