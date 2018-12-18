@@ -28,7 +28,7 @@ fn wrong_thread() -> ! {
 #[inline(never)]
 fn thread_check(reg: &Registry) -> usize {
     unsafe {
-        let worker_thread = WorkerThread::current();
+        let worker_thread = WorkerThread::unsafe_current();
         let wrong = worker_thread.is_null()
             || &*(*worker_thread).registry as *const _ != reg as *const _;
         if wrong {
