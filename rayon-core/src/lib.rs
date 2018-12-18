@@ -372,7 +372,7 @@ impl ThreadPoolBuilder {
 
     /// Use a jobserver if one is available
     pub fn jobserver(mut self) -> Self {
-        self.breadth_first = true;
+        self.jobserver = true;
         self
     }
 
