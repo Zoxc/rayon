@@ -230,9 +230,11 @@ impl Registry {
     /// Waits for the worker threads to stop. This is used for testing
     /// -- so we can check that termination actually works.
     pub(crate) fn wait_until_stopped(&self) {
+        self.proxy.return_token();
         for info in &self.thread_infos {
             info.stopped.wait();
         }
+        self.proxy.acquire_token();
     }
 
     /// ////////////////////////////////////////////////////////////////////////
@@ -383,7 +385,9 @@ impl Registry {
             op(&*worker_thread, true)
         }, LockLatch::new());
         self.inject(&[job.as_job_ref()]);
+        self.proxy.return_token();
         job.latch.wait();
+        self.proxy.acquire_token();
         job.into_result()
     }
 
