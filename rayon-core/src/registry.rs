@@ -7,6 +7,7 @@ use job::{JobRef, StackJob};
 use latch::{CountLatch, Latch, LatchProbe, LockLatch, SpinLatch, TickleLatch};
 use log::Event::*;
 use sleep::Sleep;
+use jobserver::Proxy;
 use std::any::Any;
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
@@ -25,6 +26,7 @@ pub struct Registry {
     thread_infos: Vec<ThreadInfo>,
     state: Mutex<RegistryState>,
     sleep: Sleep,
+    proxy: Arc<Proxy>,
     job_uninjector: Stealer<JobRef>,
     panic_handler: Option<Box<PanicHandler>>,
     deadlock_handler: Option<Box<DeadlockHandler>>,
@@ -105,6 +107,7 @@ impl<'a> Drop for Terminator<'a> {
 impl Registry {
     pub fn new(mut builder: ThreadPoolBuilder) -> Result<Arc<Registry>, ThreadPoolBuildError> {
         let n_threads = builder.get_num_threads();
+        let jobserver = builder.get_jobserver();
         let breadth_first = builder.get_breadth_first();
 
         let inj_worker = Deque::new();
@@ -116,6 +119,11 @@ impl Registry {
             thread_infos: stealers.into_iter().map(|s| ThreadInfo::new(s)).collect(),
             state: Mutex::new(RegistryState::new(inj_worker)),
             sleep: Sleep::new(n_threads),
+            proxy: if jobserver {
+                Proxy::from_env()
+            } else {
+                Proxy::disabled()
+            },
             job_uninjector: inj_stealer,
             terminate_latch: CountLatch::new(),
             panic_handler: builder.take_panic_handler(),
@@ -436,14 +444,17 @@ impl Registry {
 }
 
 /// Mark a Rayon worker thread as blocked. This triggers the deadlock handler
-/// if no other worker thread is active
+/// if no other worker thread is active. This also gives up the current
+/// jobserver token. It should be reacquired by calling `continue_unblocked`
+/// when the blocking stops.
 #[inline]
 pub fn mark_blocked() {
     let worker_thread = WorkerThread::current();
     assert!(!worker_thread.is_null());
     unsafe {
         let registry = &(*worker_thread).registry;
-        registry.sleep.mark_blocked(&registry.deadlock_handler)
+        registry.sleep.mark_blocked(&registry.deadlock_handler);
+        registry.proxy.return_token();
     }
 }
 
@@ -451,6 +462,18 @@ pub fn mark_blocked() {
 #[inline]
 pub fn mark_unblocked(registry: &Registry) {
     registry.sleep.mark_unblocked()
+}
+
+/// Continue execution of a worker thread that was previously marked as blocked.
+/// This requests a token for the thread from a jobserver, if one is active
+#[inline]
+pub fn continue_unblocked() {
+    let worker_thread = WorkerThread::current();
+    assert!(!worker_thread.is_null());
+    unsafe {
+        let registry = &(*worker_thread).registry;
+        registry.proxy.acquire_token();
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -513,26 +536,18 @@ pub struct WorkerThread {
 // thread local variable. So it will remain valid at least until the
 // worker is fully unwound. Using an unsafe pointer avoids the need
 // for a RefCell<T> etc.
-#[thread_local]
-static WORKER_THREAD_STATE: Cell<*const WorkerThread> =
-    Cell::new(0 as *const WorkerThread);
+thread_local! {
+    static WORKER_THREAD_STATE: Cell<*const WorkerThread> =
+        Cell::new(0 as *const WorkerThread)
+}
 
 impl WorkerThread {
     /// Gets the `WorkerThread` index for the current thread; returns
     /// NULL if this is not a worker thread. This pointer is valid
     /// anywhere on the current thread.
-    // Must have inline(never) so the use of WORKER_THREAD_STATE doesn't escape the crate
-    #[inline(never)]
+    #[inline]
     pub fn current() -> *const WorkerThread {
-        WORKER_THREAD_STATE.get()
-    }
-
-    /// Gets the `WorkerThread` index for the current thread; returns
-    /// NULL if this is not a worker thread. This pointer is valid
-    /// anywhere on the current thread.
-    #[inline(always)] /// This is unsafe because the code cannot escape this crate
-    pub(crate) unsafe fn unsafe_current() -> *const WorkerThread {
-        WORKER_THREAD_STATE.get()
+        WORKER_THREAD_STATE.with(|t| t.get())
     }
 
     /// Sets `self` as the worker thread index for the current thread.
@@ -540,8 +555,10 @@ impl WorkerThread {
     // Must have inline(never) so the use of WORKER_THREAD_STATE doesn't escape the crate
     #[inline(never)]
     unsafe fn set_current(thread: *const WorkerThread) {
-        assert!(WORKER_THREAD_STATE.get().is_null());
-        WORKER_THREAD_STATE.set(thread);
+        WORKER_THREAD_STATE.with(|t| {
+            assert!(t.get().is_null());
+            t.set(thread);
+        });
     }
 
     /// Returns the registry that owns this worker thread.
@@ -622,7 +639,8 @@ impl WorkerThread {
                 yields = self.registry.sleep.no_work_found(
                     self.index,
                     yields,
-                    &self.registry.deadlock_handler
+                    &self.registry.deadlock_handler,
+                    &*self.registry.proxy,
                 );
             }
         }
@@ -723,6 +741,8 @@ unsafe fn main_loop(
         worker_thread.wait_until(&registry.terminate_latch);
     };
 
+    registry.proxy.acquire_token();
+
     if let Some(ref handler) = registry.main_handler {
         match unwind::halt_unwinding(|| handler(index, &mut work)) {
             Ok(()) => {
@@ -755,6 +775,8 @@ unsafe fn main_loop(
         }
         // We're already exiting the thread, there's nothing else to do.
     }
+
+    registry.proxy.return_token();
 }
 
 /// If already in a worker-thread, just execute `op`.  Otherwise,

@@ -3,6 +3,7 @@
 
 use DeadlockHandler;
 use log::Event::*;
+use jobserver::Proxy;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread;
@@ -113,7 +114,13 @@ impl Sleep {
     }
 
     #[inline]
-    pub fn no_work_found(&self, worker_index: usize, yields: usize, deadlock_handler: &Option<Box<DeadlockHandler>>) -> usize {
+    pub fn no_work_found(
+        &self,
+        worker_index: usize,
+        yields: usize,
+        deadlock_handler: &Option<Box<DeadlockHandler>>,
+        proxy: &Proxy,
+    ) -> usize {
         log!(DidNotFindWork {
             worker: worker_index,
             yields: yields,
@@ -140,7 +147,7 @@ impl Sleep {
             }
         } else {
             debug_assert_eq!(yields, ROUNDS_UNTIL_ASLEEP);
-            self.sleep(worker_index, deadlock_handler);
+            self.sleep(worker_index, deadlock_handler, proxy);
             0
         }
     }
@@ -243,7 +250,12 @@ impl Sleep {
         self.worker_is_sleepy(state, worker_index)
     }
 
-    fn sleep(&self, worker_index: usize, deadlock_handler: &Option<Box<DeadlockHandler>>) {
+    fn sleep(
+        &self,
+        worker_index: usize,
+        deadlock_handler: &Option<Box<DeadlockHandler>>,
+        proxy: &Proxy,
+    ) {
         loop {
             // Acquire here suffices. If we observe that the current worker is still
             // sleepy, then in fact we know that no writes have occurred, and anyhow
@@ -324,10 +336,13 @@ impl Sleep {
                     data.active_threads -= 1;
                     data.deadlock_check(deadlock_handler);
 
+                    proxy.return_token();
+
                     let _ = self.tickle.wait(data).unwrap();
                     log!(GotAwoken {
                         worker: worker_index
                     });
+                    proxy.acquire_token();
                     return;
                 }
             } else {

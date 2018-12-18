@@ -36,6 +36,7 @@ extern crate crossbeam_deque;
 extern crate lazy_static;
 extern crate libc;
 extern crate num_cpus;
+extern crate jobserver as jobserver_crate;
 
 #[cfg(test)]
 extern crate rand;
@@ -51,6 +52,7 @@ mod scope;
 mod sleep;
 mod spawn;
 mod worker_local;
+mod jobserver;
 mod thread_pool;
 mod unwind;
 mod util;
@@ -65,7 +67,7 @@ pub mod tlv;
 pub mod internal;
 pub use join::{join, join_context};
 pub use scope::{scope, Scope};
-pub use registry::{Registry, mark_blocked, mark_unblocked};
+pub use registry::{Registry, mark_blocked, mark_unblocked, continue_unblocked};
 pub use spawn::spawn;
 pub use worker_local::WorkerLocal;
 
@@ -153,6 +155,9 @@ pub struct ThreadPoolBuilder {
 
     /// Closure invoked on worker thread start.
     main_handler: Option<Box<MainHandler>>,
+
+    /// Use a jobserver if one is available
+    jobserver: bool,
 
     /// If false, worker threads will execute spawned jobs in a
     /// "depth-first" fashion. If true, they will do a "breadth-first"
@@ -365,6 +370,16 @@ impl ThreadPoolBuilder {
         self.breadth_first
     }
 
+    /// Use a jobserver if one is available
+    pub fn jobserver(mut self) -> Self {
+        self.breadth_first = true;
+        self
+    }
+
+    fn get_jobserver(&self) -> bool {
+        self.jobserver
+    }
+
     /// Takes the current deadlock callback, leaving `None`.
     fn take_deadlock_handler(&mut self) -> Option<Box<DeadlockHandler>> {
         self.deadlock_handler.take()
@@ -552,6 +567,7 @@ impl fmt::Debug for ThreadPoolBuilder {
             ref start_handler,
             ref main_handler,
             ref exit_handler,
+            ref jobserver,
             ref breadth_first,
         } = *self;
 
@@ -579,6 +595,7 @@ impl fmt::Debug for ThreadPoolBuilder {
             .field("start_handler", &start_handler)
             .field("exit_handler", &exit_handler)
             .field("main_handler", &main_handler)
+            .field("jobserver", &jobserver)
             .field("breadth_first", &breadth_first)
             .finish()
     }
