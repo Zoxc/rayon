@@ -4,7 +4,7 @@
 use std::cell::Cell;
 
 #[thread_local]
-pub(crate) static TLV: Cell<usize> = Cell::new(0);
+static TLV: Cell<usize> = Cell::new(0);
 
 /// Sets the current thread-local value to `value` inside the closure.
 /// The old value is restored when the closure ends
