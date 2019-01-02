@@ -21,6 +21,40 @@ mod internal;
 #[cfg(test)]
 mod test;
 
+pub struct ScopeBuilder<'scope> {
+    scope: Option<Scope<'scope>>,
+}
+
+impl<'scope> ScopeBuilder<'scope> {
+    pub fn new() -> Self {
+        Self {
+            scope: None,
+        }
+    }
+
+    pub fn scope<OP, R>(&'scope mut self, op: OP) -> R
+    where
+        OP: FnOnce(&'scope Scope<'scope>) -> R + 'scope + Send,
+        R: Send,
+    {
+        in_worker(move |owner_thread, _| {
+            unsafe {
+                self.scope = Some(Scope {
+                    owner_thread_index: owner_thread.index(),
+                    registry: owner_thread.registry().clone(),
+                    panic: AtomicPtr::new(ptr::null_mut()),
+                    job_completed_latch: CountLatch::new(),
+                    marker: PhantomData,
+                });
+                let scope = self.scope.as_ref().unwrap();
+                let result = scope.execute_job_closure(move |_| op(scope));
+                scope.steal_till_jobs_complete(owner_thread);
+                result.unwrap() // only None if `op` panicked, and that would have been propagated
+            }
+        })
+    }
+}
+
 ///Represents a fork-join scope which can be used to spawn any number of tasks. See [`scope()`] for more information.
 ///
 ///[`scope()`]: fn.scope.html
@@ -44,7 +78,7 @@ pub struct Scope<'scope> {
     /// all of which outlive `'scope`.  They're not actually required to be
     /// `Sync`, but it's still safe to let the `Scope` implement `Sync` because
     /// the closures are only *moved* across threads to be executed.
-    marker: PhantomData<Box<FnOnce(&Scope<'scope>) + Send + Sync + 'scope>>,
+    marker: PhantomData<&'scope ()>,
 }
 
 /// Create a "fork-join" scope `s` and invokes the closure with a
