@@ -66,7 +66,7 @@ pub mod tlv;
 #[cfg(rayon_unstable)]
 pub mod internal;
 pub use join::{join, join_context};
-pub use scope::{scope, Scope};
+pub use scope::{scope, Scope, ScopeBuilder};
 pub use registry::{Registry, mark_blocked, mark_unblocked, continue_unblocked};
 pub use spawn::spawn;
 pub use worker_local::WorkerLocal;
