@@ -56,7 +56,6 @@ mod util;
 mod compile_fail;
 mod test;
 
-#[cfg(feature = "tlv")]
 pub mod tlv;
 
 #[cfg(rayon_unstable)]
