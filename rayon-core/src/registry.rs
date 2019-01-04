@@ -188,6 +188,17 @@ impl Registry {
         }
     }
 
+    pub fn current_thread_index() -> Option<usize> {
+        unsafe {
+            let worker_thread = WorkerThread::current();
+            if worker_thread.is_null() {
+                None
+            } else {
+                Some((*worker_thread).index)
+            }
+        }
+    }
+
     /// Returns an opaque identifier for this registry.
     pub fn id(&self) -> RegistryId {
         // We can rely on `self` not to change since we only ever create

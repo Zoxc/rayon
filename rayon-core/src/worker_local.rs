@@ -79,6 +79,13 @@ impl<T: fmt::Debug> fmt::Debug for WorkerLocal<T> {
     }
 }
 
+impl<T: Default> Default for WorkerLocal<T> {
+    #[inline]
+    fn default() -> Self {
+        WorkerLocal::new(|_| Default::default())
+    }
+}
+
 impl<T> Deref for WorkerLocal<T> {
     type Target = T;
 
