@@ -34,24 +34,23 @@ impl<'scope> ScopeBuilder<'scope> {
 
     pub fn scope<OP, R>(&'scope mut self, op: OP) -> R
     where
-        OP: FnOnce(&'scope Scope<'scope>) -> R + 'scope + Send,
-        R: Send,
+        OP: FnOnce(&'scope Scope<'scope>) -> R + 'scope,
     {
-        in_worker(move |owner_thread, _| {
-            unsafe {
-                self.scope = Some(Scope {
-                    owner_thread_index: owner_thread.index(),
-                    registry: owner_thread.registry().clone(),
-                    panic: AtomicPtr::new(ptr::null_mut()),
-                    job_completed_latch: CountLatch::new(),
-                    marker: PhantomData,
-                });
-                let scope = self.scope.as_ref().unwrap();
-                let result = scope.execute_job_closure(move |_| op(scope));
+        unsafe {
+            self.scope = Some(Scope {
+                owner_thread_index: 0,
+                registry: Registry::current(),
+                panic: AtomicPtr::new(ptr::null_mut()),
+                job_completed_latch: CountLatch::new(),
+                marker: PhantomData,
+            });
+            let scope = self.scope.as_ref().unwrap();
+            let result = scope.execute_job_closure(move |_| op(scope));
+            in_worker(move |owner_thread, _| {
                 scope.steal_till_jobs_complete(owner_thread);
-                result.unwrap() // only None if `op` panicked, and that would have been propagated
-            }
-        })
+            });
+            result.unwrap() // only None if `op` panicked, and that would have been propagated
+        }
     }
 }
 
