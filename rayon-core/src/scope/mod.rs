@@ -16,6 +16,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
 use unwind;
+use tlv;
 
 mod internal;
 #[cfg(test)]
@@ -43,6 +44,7 @@ impl<'scope> ScopeBuilder<'scope> {
                 panic: AtomicPtr::new(ptr::null_mut()),
                 job_completed_latch: CountLatch::new(),
                 marker: PhantomData,
+                tlv: tlv::get(),
             });
             let scope = self.scope.as_ref().unwrap();
             let result = scope.execute_job_closure(move |_| op(scope));
@@ -78,6 +80,9 @@ pub struct Scope<'scope> {
     /// `Sync`, but it's still safe to let the `Scope` implement `Sync` because
     /// the closures are only *moved* across threads to be executed.
     marker: PhantomData<&'scope ()>,
+
+    /// The TLV at the scope's creation. Used to set the TLV for spawned jobs.
+    tlv: usize,
 }
 
 /// Create a "fork-join" scope `s` and invokes the closure with a
@@ -302,6 +307,7 @@ where
                 panic: AtomicPtr::new(ptr::null_mut()),
                 job_completed_latch: CountLatch::new(),
                 marker: PhantomData,
+                tlv: tlv::get(),
             };
             let result = scope.execute_job_closure(op);
             scope.steal_till_jobs_complete(owner_thread);
@@ -369,7 +375,10 @@ impl<'scope> Scope<'scope> {
     {
         unsafe {
             self.job_completed_latch.increment();
-            let job_ref = Box::new(HeapJob::new(move || self.execute_job(body))).as_job_ref();
+            let job_ref = Box::new(HeapJob::new(
+                self.tlv,
+                move || self.execute_job(body),
+            )).as_job_ref();
 
             // Since `Scope` implements `Sync`, we can't be sure
             // that we're still in a thread of this pool, so we
