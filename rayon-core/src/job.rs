@@ -85,12 +85,12 @@ where
     F: FnOnce(bool) -> R + Send,
     R: Send,
 {
-    pub fn new(func: F, latch: L) -> StackJob<L, F, R> {
+    pub fn new(tlv: usize, func: F, latch: L) -> StackJob<L, F, R> {
         StackJob {
             latch: latch,
             func: UnsafeCell::new(Some(func)),
             result: UnsafeCell::new(JobResult::None),
-            tlv: tlv::get(),
+            tlv,
         }
     }
 

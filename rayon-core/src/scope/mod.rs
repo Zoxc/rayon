@@ -51,6 +51,8 @@ impl<'scope> ScopeBuilder<'scope> {
             in_worker(move |owner_thread, _| {
                 scope.steal_till_jobs_complete(owner_thread);
             });
+            // Restore the TLV if we ran some jobs while waiting
+            tlv::set(scope.tlv);
             result.unwrap() // only None if `op` panicked, and that would have been propagated
         }
     }
@@ -311,6 +313,8 @@ where
             };
             let result = scope.execute_job_closure(op);
             scope.steal_till_jobs_complete(owner_thread);
+            // Restore the TLV if we ran some jobs while waiting
+            tlv::set(scope.tlv);
             result.unwrap() // only None if `op` panicked, and that would have been propagated
         }
     })
@@ -460,6 +464,8 @@ impl<'scope> Scope<'scope> {
             log!(ScopeCompletePanicked {
                 owner_thread: owner_thread.index()
             });
+            // Restore the TLV if we ran some jobs while waiting
+            tlv::set(self.tlv);
             let value: Box<Box<Any + Send + 'static>> = mem::transmute(panic);
             unwind::resume_unwinding(*value);
         } else {
