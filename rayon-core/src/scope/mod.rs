@@ -33,6 +33,9 @@ impl<'scope> ScopeBuilder<'scope> {
         }
     }
 
+    // FIXME: &'scope Scope<'scope> means that we can spawn scopes during `scope` and after it.
+    // and before it.
+    // FIXME: Scopes spawned outside this function must not have access to `tlv`
     pub fn scope<OP, R>(&'scope mut self, op: OP) -> R
     where
         OP: FnOnce(&'scope Scope<'scope>) -> R + 'scope,
@@ -77,11 +80,9 @@ pub struct Scope<'scope> {
     /// latch to set when the counter drops to zero (and hence this scope is complete)
     job_completed_latch: CountLatch,
 
-    /// You can think of a scope as containing a list of closures to execute,
-    /// all of which outlive `'scope`.  They're not actually required to be
-    /// `Sync`, but it's still safe to let the `Scope` implement `Sync` because
-    /// the closures are only *moved* across threads to be executed.
-    marker: PhantomData<&'scope ()>,
+    /// This ensures 'scope is invariant, which is required for safety,
+    /// since otherwise you could shrink it as spawn closures which reference shorter data.
+    marker: PhantomData<&'scope mut &'scope ()>,
 
     /// The TLV at the scope's creation. Used to set the TLV for spawned jobs.
     tlv: usize,
