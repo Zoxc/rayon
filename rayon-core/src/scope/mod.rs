@@ -291,13 +291,10 @@ struct ScopeBase<'scope> {
 /// propagated at that point.
 pub fn scope<'scope, OP, R>(op: OP) -> R
 where
-    OP: for<'s> FnOnce(&'s Scope<'scope>) -> R + 'scope + Send,
-    R: Send,
+    OP: for<'s> FnOnce(&'s Scope<'scope>) -> R + 'scope,
 {
-    in_worker(|owner_thread, _| {
-        let scope = Scope::<'scope>::new(owner_thread);
-        unsafe { scope.base.complete(owner_thread, || op(&scope)) }
-    })
+    let scope = Scope::<'scope>::new();
+    unsafe { scope.base.complete(|| op(&scope)) }
 }
 
 /// Create a "fork-join" scope `s` with FIFO order, and invokes the
@@ -382,19 +379,16 @@ where
 /// panics are propagated at that point.
 pub fn scope_fifo<'scope, OP, R>(op: OP) -> R
 where
-    OP: for<'s> FnOnce(&'s ScopeFifo<'scope>) -> R + 'scope + Send,
-    R: Send,
+    OP: for<'s> FnOnce(&'s ScopeFifo<'scope>) -> R + 'scope,
 {
-    in_worker(|owner_thread, _| {
-        let scope = ScopeFifo::<'scope>::new(owner_thread);
-        unsafe { scope.base.complete(owner_thread, || op(&scope)) }
-    })
+    let scope = ScopeFifo::<'scope>::new();
+    unsafe { scope.base.complete(|| op(&scope)) }
 }
 
 impl<'scope> Scope<'scope> {
-    fn new(owner_thread: &WorkerThread) -> Self {
+    fn new() -> Self {
         Scope {
-            base: ScopeBase::new(owner_thread),
+            base: ScopeBase::new(),
         }
     }
 
@@ -469,10 +463,10 @@ impl<'scope> Scope<'scope> {
 }
 
 impl<'scope> ScopeFifo<'scope> {
-    fn new(owner_thread: &WorkerThread) -> Self {
-        let num_threads = owner_thread.registry().num_threads();
+    fn new() -> Self {
+        let num_threads = Registry::current().num_threads();
         ScopeFifo {
-            base: ScopeBase::new(owner_thread),
+            base: ScopeBase::new(),
             fifos: (0..num_threads).map(|_| JobFifo::new()).collect(),
         }
     }
@@ -517,10 +511,10 @@ impl<'scope> ScopeFifo<'scope> {
 
 impl<'scope> ScopeBase<'scope> {
     /// Create the base of a new scope for the given worker thread
-    fn new(owner_thread: &WorkerThread) -> Self {
+    fn new() -> Self {
         ScopeBase {
-            owner_thread_index: owner_thread.index(),
-            registry: owner_thread.registry().clone(),
+            owner_thread_index: 0,
+            registry: Registry::current(),
             panic: AtomicPtr::new(ptr::null_mut()),
             job_completed_latch: CountLatch::new(),
             marker: PhantomData,
@@ -536,12 +530,14 @@ impl<'scope> ScopeBase<'scope> {
     /// appropriate.
     ///
     /// Unsafe because it must be executed on a worker thread.
-    unsafe fn complete<FUNC, R>(&self, owner_thread: &WorkerThread, func: FUNC) -> R
+    unsafe fn complete<FUNC, R>(&self, func: FUNC) -> R
     where
         FUNC: FnOnce() -> R,
     {
         let result = self.execute_job_closure(func);
-        self.steal_till_jobs_complete(owner_thread);
+        in_worker(|owner_thread, _| {
+            self.steal_till_jobs_complete(owner_thread);
+        });
         // Restore the TLV if we ran some jobs while waiting
         tlv::set(self.tlv);
         result.unwrap() // only None if `op` panicked, and that would have been propagated
