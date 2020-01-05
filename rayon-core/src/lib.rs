@@ -47,6 +47,7 @@ mod log;
 #[macro_use]
 mod private;
 
+mod flex_scope;
 mod job;
 mod join;
 mod latch;
@@ -66,6 +67,7 @@ pub mod tlv;
 
 #[cfg(rayon_unstable)]
 pub mod internal;
+pub use flex_scope::FlexScope;
 pub use join::{join, join_context};
 pub use registry::ThreadBuilder;
 pub use registry::{mark_blocked, mark_unblocked, Registry};
