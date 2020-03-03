@@ -10,7 +10,7 @@ use std::thread;
 use std::usize;
 
 struct SleepData {
-    /// The number of threads in the thread pool.
+    /// The number of threads in the thread pool that have started up so far.
     worker_count: usize,
 
     /// The number of threads in the thread pool which are running and
@@ -45,16 +45,23 @@ const ROUNDS_UNTIL_SLEEPY: usize = 32;
 const ROUNDS_UNTIL_ASLEEP: usize = 64;
 
 impl Sleep {
-    pub(super) fn new(worker_count: usize) -> Sleep {
+    pub(super) fn new() -> Sleep {
         Sleep {
             state: AtomicUsize::new(AWAKE),
             data: Mutex::new(SleepData {
-                worker_count,
-                active_threads: worker_count,
+                worker_count: 0,
+                active_threads: 0,
                 blocked_threads: 0,
             }),
             tickle: Condvar::new(),
         }
+    }
+
+    pub(super) fn new_worker(&self) {
+        let mut data = self.data.lock().unwrap();
+
+        data.worker_count += 1;
+        data.active_threads += 1;
     }
 
     /// Mark a Rayon worker thread as blocked. This triggers the deadlock handler

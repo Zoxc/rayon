@@ -21,8 +21,9 @@ use std::ptr;
 #[allow(deprecated)]
 use std::sync::atomic::ATOMIC_USIZE_INIT;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Once};
 use std::thread;
+use std::time::Duration;
 use std::usize;
 
 /// Thread builder used for customization via
@@ -132,10 +133,33 @@ where
     }
 }
 
+struct ThreadSpawningState {
+    /// The number of threads that we have started spawning.
+    spawned_threads: usize,
+
+    /// Indicates if a thread being spawned right now.
+    spawning_thread: bool,
+
+    /// The number of threads that the thread pool should have at this moment.
+    /// If this is lower than the spawned thread count, the thread pool will spawn
+    /// more threads until the target is hit. If this is set lower than the spawned thread
+    /// count, nothing will happen.
+    thread_target: usize,
+
+    /// When this is set to true, no more threads are allowed to join the thread pool
+    /// and the `stopped` latch in `ThreadInfo` of the threads that haven't joined is set.
+    terminating: bool,
+}
+
 pub struct Registry {
     thread_infos: Vec<ThreadInfo>,
     sleep: Sleep,
     injected_jobs: SegQueue<JobRef>,
+    thread_spawn: Mutex<Box<dyn ThreadSpawn + Send>>,
+
+    /// The stack size for the created worker threads
+    stack_size: Option<usize>,
+
     panic_handler: Option<Box<PanicHandler>>,
     pub(crate) deadlock_handler: Option<Box<DeadlockHandler>>,
     start_handler: Option<Box<StartHandler>>,
@@ -157,6 +181,17 @@ pub struct Registry {
     //   These are always owned by some other job (e.g., one injected by `ThreadPool::install()`)
     //   and that job will keep the pool alive.
     terminate_latch: CountLatch,
+
+    // Used to avoid races when adding threads to the thread pool.
+    thread_spawning_state: Mutex<ThreadSpawningState>,
+
+    // The `thread_spawning_state` lock also protects this, but is stored outside so it can
+    // be efficiently accessed by work stealing, which does not need an up to date value.
+    active_threads: AtomicUsize,
+
+    // Used with `thread_spawning_state` to wait for a duration or thread pool termination
+    // during thread startup.
+    terminate_cond_var: Condvar,
 }
 
 /// ////////////////////////////////////////////////////////////////////////
@@ -180,7 +215,7 @@ pub(super) fn init_global_registry<S>(
     builder: ThreadPoolBuilder<S>,
 ) -> Result<&'static Arc<Registry>, ThreadPoolBuildError>
 where
-    S: ThreadSpawn,
+    S: ThreadSpawn + Send + 'static,
 {
     set_global_registry(|| Registry::new(builder))
 }
@@ -219,27 +254,36 @@ impl Registry {
         mut builder: ThreadPoolBuilder<S>,
     ) -> Result<Arc<Self>, ThreadPoolBuildError>
     where
-        S: ThreadSpawn,
+        S: ThreadSpawn + Send + 'static,
     {
         let n_threads = builder.get_num_threads();
         let breadth_first = builder.get_breadth_first();
 
-        let (workers, stealers): (Vec<_>, Vec<_>) = (0..n_threads)
-            .map(|_| {
-                let worker = if breadth_first {
-                    Worker::new_fifo()
-                } else {
-                    Worker::new_lifo()
-                };
+        let queues = (0..n_threads).map(|_| {
+            let worker = if breadth_first {
+                Worker::new_fifo()
+            } else {
+                Worker::new_lifo()
+            };
 
-                let stealer = worker.stealer();
-                (worker, stealer)
-            })
-            .unzip();
+            let stealer = worker.stealer();
+            (worker, stealer)
+        });
 
         let registry = Arc::new(Registry {
-            thread_infos: stealers.into_iter().map(ThreadInfo::new).collect(),
-            sleep: Sleep::new(n_threads),
+            thread_infos: queues
+                .enumerate()
+                .map(|(index, (worker, stealer))| {
+                    ThreadInfo::new(
+                        stealer,
+                        worker,
+                        builder.get_thread_name(index),
+                        builder.get_thread_wait_time(index),
+                    )
+                })
+                .collect(),
+            sleep: Sleep::new(),
+            stack_size: builder.stack_size,
             injected_jobs: SegQueue::new(),
             terminate_latch: CountLatch::new(),
             panic_handler: builder.take_panic_handler(),
@@ -248,28 +292,95 @@ impl Registry {
             exit_handler: builder.take_exit_handler(),
             acquire_thread_handler: builder.take_acquire_thread_handler(),
             release_thread_handler: builder.take_release_thread_handler(),
+            thread_spawn: Mutex::new(Box::new(builder.spawn_handler)),
+            thread_spawning_state: Mutex::new(ThreadSpawningState {
+                spawned_threads: 0,
+                spawning_thread: false,
+                thread_target: 1,
+                terminating: false,
+            }),
+            active_threads: AtomicUsize::new(0),
+            terminate_cond_var: Condvar::new(),
         });
 
         // If we return early or panic, make sure to terminate existing threads.
         let t1000 = Terminator(&registry);
 
-        for (index, worker) in workers.into_iter().enumerate() {
-            let thread = ThreadBuilder {
-                name: builder.get_thread_name(index),
-                stack_size: builder.get_stack_size(),
-                registry: registry.clone(),
-                worker,
-                index,
-            };
-            if let Err(e) = builder.get_spawn_handler().spawn(thread) {
-                return Err(ThreadPoolBuildError::new(ErrorKind::IOError(e)));
-            }
-        }
+        // Spawn the initial thread
+        registry.try_spawn_thread(registry.thread_spawning_state.lock().unwrap())?;
 
         // Returning normally now, without termination.
         mem::forget(t1000);
 
         Ok(registry.clone())
+    }
+
+    /// Changes the number of threads that the thread pool should have at this moment.
+    /// Threads will be spawned until this target is met. However if this target is lowered,
+    /// threads that are already spawned will remain a part of the thread pool.
+    pub fn set_thread_target(self: &Arc<Self>, target: usize) {
+        assert!(target > 0 && target <= self.num_threads());
+
+        let mut state = self.thread_spawning_state.lock().unwrap();
+        state.thread_target = target;
+
+        // Try to spawn a new thread if wanted
+        self.try_spawn_thread(state).unwrap();
+    }
+
+    /// Spawns a new thread if suitable conditions to add a thread exists.
+    fn try_spawn_thread(
+        self: &Arc<Self>,
+        mut state: MutexGuard<'_, ThreadSpawningState>,
+    ) -> Result<(), ThreadPoolBuildError> {
+        let index = {
+            if state.spawning_thread {
+                // Another thread is currently spawning already
+                return Ok(());
+            }
+
+            if state.spawned_threads >= state.thread_target {
+                // We are not supposed to spawn more threads right now
+                return Ok(());
+            }
+
+            if state.terminating {
+                // We are not supposed to spawn more threads after the thread pool is in a
+                // terminating state
+                return Ok(());
+            }
+
+            state.spawning_thread = true;
+
+            let index = state.spawned_threads;
+            state.spawned_threads += 1;
+
+            mem::drop(state);
+
+            index
+        };
+
+        // Steal the work queue for this thread
+        let worker = self.thread_infos[index]
+            .worker
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap();
+
+        let thread = ThreadBuilder {
+            name: self.thread_infos[index].name.clone(),
+            stack_size: self.stack_size,
+            registry: self.clone(),
+            worker,
+            index,
+        };
+
+        self.thread_spawn
+            .lock()
+            .unwrap()
+            .spawn(thread)
+            .map_err(|e| ThreadPoolBuildError::new(ErrorKind::IOError(e)))
     }
 
     pub fn current() -> Arc<Registry> {
@@ -530,7 +641,36 @@ impl Registry {
     /// extant work is completed.
     pub(super) fn terminate(&self) {
         self.terminate_latch.set();
-        self.sleep.tickle(usize::MAX);
+
+        if self.terminate_latch.probe() {
+            self.sleep.tickle(usize::MAX);
+
+            let active_threads = {
+                let mut state = self.thread_spawning_state.lock().unwrap();
+
+                if state.terminating {
+                    // Some other thread will mark the non started thread as stopped
+                    return;
+                }
+
+                // Load `active_threads` while we hold the mutex so
+                // it won't race with thread startup.
+                let active_threads = self.active_threads.load(Ordering::Relaxed);
+
+                state.terminating = true;
+
+                active_threads
+            };
+
+            // Wake up any threads which have trottled their startup since we need them
+            // to terminate now.
+            self.terminate_cond_var.notify_all();
+
+            // Mark threads that did not start up yet as terminated
+            for index in active_threads..self.num_threads() {
+                self.thread_infos[index].stopped.set();
+            }
+        }
     }
 }
 
@@ -569,14 +709,31 @@ struct ThreadInfo {
 
     /// the "stealer" half of the worker's deque
     stealer: Stealer<JobRef>,
+
+    /// Holds the worker's half of the worker's deque, until this thread starts.
+    worker: Mutex<Option<Worker<JobRef>>>,
+
+    /// The name of this worker thread, if any.
+    name: Option<String>,
+
+    /// The wait time before bringing up the thread, if any.
+    wait_time: Option<Duration>,
 }
 
 impl ThreadInfo {
-    fn new(stealer: Stealer<JobRef>) -> ThreadInfo {
+    fn new(
+        stealer: Stealer<JobRef>,
+        worker: Worker<JobRef>,
+        name: Option<String>,
+        wait_time: Option<Duration>,
+    ) -> ThreadInfo {
         ThreadInfo {
             primed: LockLatch::new(),
             stopped: LockLatch::new(),
             stealer,
+            worker: Mutex::new(Some(worker)),
+            name,
+            wait_time,
         }
     }
 }
@@ -741,7 +898,7 @@ impl WorkerThread {
         debug_assert!(self.local_deque_is_empty());
 
         // otherwise, try to steal
-        let num_threads = self.registry.thread_infos.len();
+        let num_threads = self.registry.active_threads.load(Ordering::Acquire);
         if num_threads <= 1 {
             return None;
         }
@@ -782,13 +939,58 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
     };
     WorkerThread::set_current(worker_thread);
 
-    // let registry know we are ready to do work
-    registry.thread_infos[index].primed.set();
-
     // Worker threads should not panic. If they do, just abort, as the
     // internal state of the threadpool is corrupted. Note that if
     // **user code** panics, we should catch that and redirect.
     let abort_guard = unwind::AbortIfPanic;
+
+    if let Some(duration) = registry.thread_infos[index].wait_time {
+        registry
+            .terminate_cond_var
+            .wait_timeout(registry.thread_spawning_state.lock().unwrap(), duration);
+    }
+
+    if registry.terminate_latch.probe() {
+        // The thread pool terminated while we where starting up or waiting.
+
+        // Normal termination, do not abort.
+        mem::forget(abort_guard);
+
+        return;
+    }
+
+    registry.acquire_thread();
+
+    {
+        let mut state = registry.thread_spawning_state.lock().unwrap();
+
+        // If the registry terminated before we got the lock, we must pretend that this
+        // thread was never a part of the thread pool, so we release the thread and return.
+        if state.terminating {
+            mem::drop(state);
+
+            // The thread pool terminated while we where waiting
+            registry.release_thread();
+
+            // Normal termination, do not abort.
+            mem::forget(abort_guard);
+
+            return;
+        }
+
+        state.spawning_thread = false;
+
+        // Mark ourself as active so work can be stolen from us.
+        // We modify this while holding the mutex so it won't race with terminating
+        // the thread pool.
+        registry.active_threads.fetch_add(1, Ordering::Release);
+
+        // Try to spawn a new thread if wanted
+        registry.try_spawn_thread(state).unwrap();
+    }
+
+    // Notify the sleep module of the new worker
+    registry.sleep.new_worker();
 
     // Inform a user callback that we started a thread.
     if let Some(ref handler) = registry.start_handler {
@@ -801,7 +1003,9 @@ unsafe fn main_loop(worker: Worker<JobRef>, registry: Arc<Registry>, index: usiz
         }
     }
 
-    registry.acquire_thread();
+    // let registry know we are ready to do work
+    registry.thread_infos[index].primed.set();
+
     worker_thread.wait_until(&registry.terminate_latch);
 
     // Should not be any work left in our queue.

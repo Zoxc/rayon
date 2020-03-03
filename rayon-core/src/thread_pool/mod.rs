@@ -64,7 +64,7 @@ impl ThreadPool {
         builder: ThreadPoolBuilder<S>,
     ) -> Result<ThreadPool, ThreadPoolBuildError>
     where
-        S: ThreadSpawn,
+        S: ThreadSpawn + Send + 'static,
     {
         let registry = Registry::new(builder)?;
         Ok(ThreadPool { registry })

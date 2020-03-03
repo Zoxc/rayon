@@ -27,7 +27,9 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
+use std::mem;
 use std::str::FromStr;
+use std::time::Duration;
 
 #[macro_use]
 mod log;
@@ -129,6 +131,9 @@ pub struct ThreadPoolBuilder<S = DefaultSpawn> {
     /// Closure to compute the name of a thread.
     get_thread_name: Option<Box<dyn FnMut(usize) -> String>>,
 
+    /// The wait time before bringing up a thread.
+    get_thread_wait_time: Option<Box<dyn FnMut(usize) -> Option<Duration>>>,
+
     /// The stack size for the created worker threads
     stack_size: Option<usize>,
 
@@ -188,6 +193,7 @@ impl Default for ThreadPoolBuilder {
             num_threads: 0,
             panic_handler: None,
             get_thread_name: None,
+            get_thread_wait_time: None,
             stack_size: None,
             start_handler: None,
             exit_handler: None,
@@ -219,7 +225,7 @@ impl ThreadPoolBuilder {
 /// default spawn and those set by [`spawn_handler`](#method.spawn_handler).
 impl<S> ThreadPoolBuilder<S>
 where
-    S: ThreadSpawn,
+    S: ThreadSpawn + Send + 'static,
 {
     /// Create a new `ThreadPool` initialized using this configuration.
     pub fn build(self) -> Result<ThreadPool, ThreadPoolBuildError> {
@@ -295,19 +301,29 @@ impl ThreadPoolBuilder {
     {
         let result = crossbeam_utils::thread::scope(|scope| {
             let wrapper = &wrapper;
-            let pool = self
-                .spawn_handler(|thread| {
-                    let mut builder = scope.builder();
-                    if let Some(name) = thread.name() {
-                        builder = builder.name(name.to_string());
-                    }
-                    if let Some(size) = thread.stack_size() {
-                        builder = builder.stack_size(size);
-                    }
-                    builder.spawn(move |_| wrapper(thread))?;
-                    Ok(())
-                })
-                .build()?;
+            let spawn_handler = move |thread: ThreadBuilder| {
+                let mut builder = scope.builder();
+                if let Some(name) = thread.name() {
+                    builder = builder.name(name.to_string());
+                }
+                if let Some(size) = thread.stack_size() {
+                    builder = builder.stack_size(size);
+                }
+                builder.spawn(move |_| wrapper(thread))?;
+                Ok(())
+            };
+
+            // Allocate `spawn_handler` on the heap and make it `'static`.
+            // This is safe because we wait for the thread pool to end before
+            // returning from this closure. Once the thread pool has ended
+            // no more uses of `spawn_handler` can occur.
+            let spawn_handler: Box<dyn Fn(ThreadBuilder) -> io::Result<()> + Sync + Send + '_> =
+                Box::new(spawn_handler);
+            let spawn_handler: Box<
+                dyn Fn(ThreadBuilder) -> io::Result<()> + Sync + Send + 'static,
+            > = unsafe { mem::transmute(spawn_handler) };
+
+            let pool = self.spawn_handler(spawn_handler).build()?;
             let result = unwind::halt_unwinding(|| with_pool(&pool));
             pool.wait_until_stopped();
             match result {
@@ -388,6 +404,7 @@ impl<S> ThreadPoolBuilder<S> {
             num_threads: self.num_threads,
             panic_handler: self.panic_handler,
             get_thread_name: self.get_thread_name,
+            get_thread_wait_time: self.get_thread_wait_time,
             stack_size: self.stack_size,
             start_handler: self.start_handler,
             exit_handler: self.exit_handler,
@@ -442,6 +459,22 @@ impl<S> ThreadPoolBuilder<S> {
         F: FnMut(usize) -> String + 'static,
     {
         self.get_thread_name = Some(Box::new(closure));
+        self
+    }
+
+    /// Get the thread wait time for the thread with the given index.
+    fn get_thread_wait_time(&mut self, index: usize) -> Option<Duration> {
+        let f = self.get_thread_wait_time.as_mut()?;
+        f(index)
+    }
+
+    /// Set a closure which takes a thread index and returns
+    /// the thread's wait time.
+    pub fn thread_wait_time<F>(mut self, closure: F) -> Self
+    where
+        F: FnMut(usize) -> Option<Duration> + 'static,
+    {
+        self.get_thread_wait_time = Some(Box::new(closure));
         self
     }
 
@@ -745,6 +778,7 @@ impl<S> fmt::Debug for ThreadPoolBuilder<S> {
         let ThreadPoolBuilder {
             ref num_threads,
             ref get_thread_name,
+            ref get_thread_wait_time,
             ref panic_handler,
             ref stack_size,
             ref deadlock_handler,
@@ -765,6 +799,7 @@ impl<S> fmt::Debug for ThreadPoolBuilder<S> {
             }
         }
         let get_thread_name = get_thread_name.as_ref().map(|_| ClosurePlaceholder);
+        let get_thread_wait_time = get_thread_wait_time.as_ref().map(|_| ClosurePlaceholder);
         let panic_handler = panic_handler.as_ref().map(|_| ClosurePlaceholder);
         let deadlock_handler = deadlock_handler.as_ref().map(|_| ClosurePlaceholder);
         let start_handler = start_handler.as_ref().map(|_| ClosurePlaceholder);
@@ -775,6 +810,7 @@ impl<S> fmt::Debug for ThreadPoolBuilder<S> {
         f.debug_struct("ThreadPoolBuilder")
             .field("num_threads", num_threads)
             .field("get_thread_name", &get_thread_name)
+            .field("get_thread_wait_time", &get_thread_wait_time)
             .field("panic_handler", &panic_handler)
             .field("stack_size", &stack_size)
             .field("deadlock_handler", &deadlock_handler)
