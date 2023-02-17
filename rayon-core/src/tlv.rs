@@ -1,30 +1,28 @@
 //! Allows access to the Rayon's thread local value
 //! which is preserved when moving jobs across threads
 
-use std::cell::Cell;
+use std::{cell::Cell, ptr};
 
-thread_local!(pub(crate) static TLV: Cell<usize> = Cell::new(0));
+thread_local!(pub static TLV: Cell<*const ()> = const { Cell::new(ptr::null()) });
 
-/// Sets the current thread-local value to `value` inside the closure.
-/// The old value is restored when the closure ends
-pub fn with<F: FnOnce() -> R, R>(value: usize, f: F) -> R {
-    struct Reset(usize);
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            TLV.with(|tlv| tlv.set(self.0));
-        }
+#[derive(Copy, Clone)]
+pub(crate) struct Tlv(pub(crate) *const ());
+
+impl Tlv {
+    pub(crate) fn null() -> Self {
+        Self(ptr::null())
     }
-    let _reset = Reset(get());
-    TLV.with(|tlv| tlv.set(value));
-    f()
 }
 
+unsafe impl Sync for Tlv {}
+unsafe impl Send for Tlv {}
+
 /// Sets the current thread-local value
-pub fn set(value: usize) {
-    TLV.with(|tlv| tlv.set(value));
+pub(crate) fn set(value: Tlv) {
+    TLV.with(|tlv| tlv.set(value.0));
 }
 
 /// Returns the current thread-local value
-pub fn get() -> usize {
-    TLV.with(|tlv| tlv.get())
+pub(crate) fn get() -> Tlv {
+    TLV.with(|tlv| Tlv(tlv.get()))
 }

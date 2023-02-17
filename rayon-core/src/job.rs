@@ -1,5 +1,6 @@
 use crate::latch::Latch;
 use crate::tlv;
+use crate::tlv::Tlv;
 use crate::unwind;
 use crossbeam_deque::{Injector, Steal};
 use std::any::Any;
@@ -74,7 +75,7 @@ where
     pub(super) latch: L,
     func: UnsafeCell<Option<F>>,
     result: UnsafeCell<JobResult<R>>,
-    tlv: usize,
+    tlv: Tlv,
 }
 
 impl<L, F, R> StackJob<L, F, R>
@@ -83,7 +84,7 @@ where
     F: FnOnce(bool) -> R + Send,
     R: Send,
 {
-    pub(super) fn new(tlv: usize, func: F, latch: L) -> StackJob<L, F, R> {
+    pub(super) fn new(tlv: Tlv, func: F, latch: L) -> StackJob<L, F, R> {
         StackJob {
             latch,
             func: UnsafeCell::new(Some(func)),
@@ -140,14 +141,14 @@ where
     BODY: FnOnce() + Send,
 {
     job: UnsafeCell<Option<BODY>>,
-    tlv: usize,
+    tlv: Tlv,
 }
 
 impl<BODY> HeapJob<BODY>
 where
     BODY: FnOnce() + Send,
 {
-    pub(super) fn new(tlv: usize, func: BODY) -> Self {
+    pub(super) fn new(tlv: Tlv, func: BODY) -> Self {
         HeapJob {
             job: UnsafeCell::new(Some(func)),
             tlv,

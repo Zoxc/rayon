@@ -8,7 +8,7 @@
 use crate::job::{HeapJob, JobFifo};
 use crate::latch::{CountLatch, CountLockLatch, Latch};
 use crate::registry::{global_registry, in_worker, Registry, WorkerThread};
-use crate::tlv;
+use crate::tlv::{self, Tlv};
 use crate::unwind;
 use std::any::Any;
 use std::fmt;
@@ -78,7 +78,7 @@ struct ScopeBase<'scope> {
     marker: PhantomData<Box<dyn FnOnce(&Scope<'scope>) + Send + Sync + 'scope>>,
 
     /// The TLV at the scope's creation. Used to set the TLV for spawned jobs.
-    tlv: usize,
+    tlv: Tlv,
 }
 
 /// Creates a "fork-join" scope `s` and invokes the closure with a

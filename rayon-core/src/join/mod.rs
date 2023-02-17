@@ -1,7 +1,7 @@
 use crate::job::StackJob;
 use crate::latch::SpinLatch;
 use crate::registry::{self, WorkerThread};
-use crate::tlv;
+use crate::tlv::{self, Tlv};
 use crate::unwind;
 use std::any::Any;
 
@@ -190,7 +190,7 @@ unsafe fn join_recover_from_panic(
     worker_thread: &WorkerThread,
     job_b_latch: &SpinLatch<'_>,
     err: Box<dyn Any + Send>,
-    tlv: usize,
+    tlv: Tlv,
 ) -> ! {
     worker_thread.wait_until(job_b_latch);
 
