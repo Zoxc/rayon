@@ -21,6 +21,7 @@ exclude = ["ci"]
 [dependencies]
 rayon-core = { version = "0.3", path = "rayon-core", package = "rustc-rayon-core" }
 crossbeam-deque = "0.8.0"
+indexmap = { version = "2", optional = true }
 
 # This is a public dependency!
 [dependencies.either]

@@ -106,6 +106,7 @@ pub mod vec;
 
 mod math;
 mod par_either;
+mod par_indexmap;
 
 mod compile_fail;
 
