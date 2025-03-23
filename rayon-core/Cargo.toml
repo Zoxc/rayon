@@ -1,8 +1,10 @@
 [package]
 name = "rustc-rayon-core"
-version = "0.3.2" # reminder to update html_root_url attribute
-authors = ["Niko Matsakis <niko@alum.mit.edu>",
-           "Josh Stone <cuviper@gmail.com>"]
+version = "0.5.1" # reminder to update html_root_url attribute
+authors = [
+    "Niko Matsakis <niko@alum.mit.edu>",
+    "Josh Stone <cuviper@gmail.com>",
+]
 description = "Core APIs for Rayon - fork for rustc"
 license = "Apache-2.0/MIT"
 repository = "https://github.com/rust-lang/rustc-rayon"
