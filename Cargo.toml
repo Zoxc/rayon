@@ -1,9 +1,11 @@
 [package]
 name = "rustc-rayon"
 # Reminder to update html_rool_url in lib.rs when updating version
-version = "0.3.2"
-authors = ["Niko Matsakis <niko@alum.mit.edu>",
-           "Josh Stone <cuviper@gmail.com>"]
+version = "0.5.0"
+authors = [
+    "Niko Matsakis <niko@alum.mit.edu>",
+    "Josh Stone <cuviper@gmail.com>",
+]
 description = "Simple work-stealing parallelism for Rust - fork for rustc"
 edition = "2018"
 license = "Apache-2.0/MIT"
@@ -19,7 +21,7 @@ members = ["rayon-core"]
 exclude = ["ci"]
 
 [dependencies]
-rayon-core = { version = "0.3", path = "rayon-core", package = "rustc-rayon-core" }
+rayon-core = { version = "0.5", path = "rayon-core", package = "rustc-rayon-core" }
 crossbeam-deque = "0.8.0"
 indexmap = { version = "2", optional = true }
 
