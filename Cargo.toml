@@ -16,6 +16,9 @@ keywords = ["parallel", "thread", "concurrency", "join", "performance"]
 categories = ["concurrency"]
 exclude = ["/ci/*", "/scripts/*", "/.travis.yml", "/appveyor.yml", "/bors.toml"]
 
+[lib]
+name = "rayon"
+
 [workspace]
 members = ["rayon-core"]
 exclude = ["ci"]
